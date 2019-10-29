@@ -76,3 +76,7 @@ m4/*.m4
 /harnesses/timeout-*
 /harnesses/crash-*
 /harnesses/oom-*
+
+# Swift Package Manager
+.build/
+*.xcodeproj
