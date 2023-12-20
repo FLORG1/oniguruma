@@ -8,65 +8,74 @@ import Foundation
 import COniguruma
 
 public struct Regex {
-  var regex: OnigRegex?
-  var error_info: OnigErrorInfo
-  
-  public let pattern: String
-  
-  public init?(_ pattern: String) {
+  private var regex: OnigRegex?
+  private var error_info: OnigErrorInfo
+
+  private let codeUnitLength: Int
+
+  public init?(_ pattern: String, encoding: String.Encoding) {
     self.regex = nil
     self.error_info = OnigErrorInfo()
-    
-    self.pattern = pattern
-    
-    let status: Int32 = pattern.withCString(encodedAs: Unicode.UTF8.self) {
-      let end = $0.advanced(by: pattern.utf8.count)
-      return onig_new(&regex, $0, end, ONIG_OPTION_CAPTURE_GROUP, &OnigEncodingUTF8, OnigDefaultSyntax, &error_info)
+    self.codeUnitLength = encoding.codeUnitLength
+
+    let status: Int32? = pattern.data(using: encoding)?.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+      let buf = ptr.bindMemory(to: UInt8.self)
+      let uint8p = buf.baseAddress!
+
+      let end = uint8p.advanced(by: buf.count)
+
+      return encoding.withUnsafeMutableEncodingPtr {
+        guard let ptr = $0 else { return nil }
+        return onig_new(&regex, uint8p, end, ONIG_OPTION_CAPTURE_GROUP, ptr, OnigDefaultSyntax, &error_info)
+      }
     }
-    
-    if status != ONIG_NORMAL {
-      return nil
-    }
+
+    guard status == ONIG_NORMAL else { return nil }
   }
-  
-  public func search(_ str: String, from: Int? = nil, to: Int? = nil) -> SearchResult? {
+
+  public func search(_ data: Data, from: Int? = nil, to: Int? = nil) -> SearchResult? {
     let region = onig_region_new()
     defer {
       onig_region_free(region, Int32(1))
     }
-    
-    let pos: Int32 = str.withCString(encodedAs: Unicode.UTF8.self) {
-      let data = str.utf8
-      let end = $0.advanced(by: data.count)
-      
-      let start = $0.advanced(by: from ?? 0)
-      let range = $0.advanced(by: to ?? data.count)
-      
-      return onig_search(self.regex, $0, end, start, range, region, ONIG_OPTION_NONE)
+
+    let pos = data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+      let buf = ptr.bindMemory(to: UInt8.self)
+      let uint8p = buf.baseAddress!
+
+      let _from = (from == nil) ? 0 : from! * self.codeUnitLength
+      let _to = (to == nil) ? buf.count : to! * self.codeUnitLength
+
+      let end = uint8p.advanced(by: buf.count)
+
+      let start = uint8p.advanced(by: _from)
+      let range = uint8p.advanced(by: _to)
+
+      return onig_search(self.regex, uint8p, end, start, range, region, ONIG_OPTION_NONE)
     }
-    
+
     if pos >= 0 {
-      let result = SearchResult(at: Int(pos), regex: regex, region: region)
+      let result = SearchResult(at: Int(pos), regex: regex, region: region, codeUnitLength: self.codeUnitLength)
       return result
     }
-    
+
     return nil
   }
-  
-  public func search(_ str: String, in range: Range<Int>) -> SearchResult? {
-    return search(str, from: range.lowerBound, to: range.upperBound)
+
+  public func search(_ data: Data, in range: Range<Int>) -> SearchResult? {
+    return search(data, from: range.lowerBound, to: range.upperBound)
   }
   
-  public func search(_ str: String, in range: NSRange) -> SearchResult? {
-    return search(str, from: range.lowerBound, to: range.upperBound)
+  public func search(_ data: Data, in range: NSRange) -> SearchResult? {
+    return search(data, from: range.lowerBound, to: range.upperBound)
   }
   
-  public func search(_ str: String, in range: PartialRangeFrom<Int>) -> SearchResult? {
-    return search(str, from: range.lowerBound)
+  public func search(_ data: Data, in range: PartialRangeFrom<Int>) -> SearchResult? {
+    return search(data, from: range.lowerBound)
   }
   
-  public func search(_ str: String, in range: PartialRangeUpTo<Int>) -> SearchResult? {
-    return search(str, to: range.upperBound)
+  public func search(_ data: Data, in range: PartialRangeUpTo<Int>) -> SearchResult? {
+    return search(data, to: range.upperBound)
   }
   
   // MARK: -
@@ -79,14 +88,21 @@ public struct Regex {
     
     public var range: Range<Int> { return regs[0] }
     
-    fileprivate init(at pos: Int, regex: OnigRegex?, region: UnsafeMutablePointer<OnigRegion>?) {
-      self.at = pos
+    fileprivate init(at pos: Int, regex: OnigRegex?, region: UnsafeMutablePointer<OnigRegion>?, codeUnitLength: Int) {
+      self.at = (pos - 1 + codeUnitLength) / codeUnitLength
       
-      if let _region = region {
-        let reg = _region.pointee
+      if let region = region {
+        let reg = region.pointee
         for i in 0..<Int(reg.num_regs) {
-          let beg = Int(reg.beg.advanced(by: i).pointee)
-          let end = Int(reg.end.advanced(by: i).pointee)
+          let a = Int(reg.beg.advanced(by: i).pointee)
+          let b = Int(reg.end.advanced(by: i).pointee)
+
+          guard a != ONIG_REGION_NOTPOS,
+                b != ONIG_REGION_NOTPOS else { continue }
+
+          let beg =  (a - 1 + codeUnitLength) / codeUnitLength
+          let end =  (b - 1 + codeUnitLength) / codeUnitLength
+
           self.regs.append(beg..<end)
         }
         
@@ -97,8 +113,6 @@ public struct Regex {
       }
     }
   }
-  
-  
 }
 
 // MARK -
